@@ -1,0 +1,207 @@
+import { Client } from "pg";
+import { env } from "./env_validator";
+
+// Global database client instance
+class Database {
+  private static instance: Client;
+  private static isInitialized = false;
+
+  // Private constructor to prevent direct instantiation
+  private constructor() {}
+
+  // Initialize the database connection
+  public static async initialize() {
+    if (Database.isInitialized) return;
+
+    Database.instance = new Client({
+      host: env.DB_HOST,
+      port: env.DB_PORT,
+      user: env.DB_USER,
+      password: env.DB_PASSWORD,
+      database: env.DB_NAME,
+    });
+
+    try {
+      await Database.instance.connect();
+      await Database.setupDatabase();
+      Database.isInitialized = true;
+      console.log("Database connected and initialized");
+    } catch (error) {
+      console.error("Database initialization failed:", error);
+      throw error;
+    }
+  }
+
+  // Setup database schema
+  private static async setupDatabase() {
+    await Database.instance.query("CREATE EXTENSION IF NOT EXISTS vector");
+    await Database.instance.query(`
+      CREATE TABLE IF NOT EXISTS documents (
+        id SERIAL PRIMARY KEY,
+        content TEXT,
+        metadata JSONB,
+        embedding vector(768),
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    // Add indexes for better performance
+    await Database.instance.query(`
+      CREATE INDEX IF NOT EXISTS idx_documents_metadata ON documents USING GIN (metadata)
+    `);
+
+    // Create clauses table for constitution data
+    await Database.instance.query(`
+      CREATE TABLE IF NOT EXISTS clauses (
+        id SERIAL PRIMARY KEY,
+        clause_id VARCHAR(50) NOT NULL,
+        part_title TEXT NOT NULL,
+        article_number INTEGER NOT NULL,
+        article_title TEXT NOT NULL,
+        clause_number INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        source_reference TEXT,
+        tags TEXT,
+        language VARCHAR(20) NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Create indexes for clauses table
+    await Database.instance.query(`
+      CREATE INDEX IF NOT EXISTS idx_clauses_clause_id ON clauses (clause_id)
+    `);
+    await Database.instance.query(`
+      CREATE INDEX IF NOT EXISTS idx_clauses_article_number ON clauses (article_number)
+    `);
+    await Database.instance.query(`
+      CREATE INDEX IF NOT EXISTS idx_clauses_part_title ON clauses (part_title)
+    `);
+  }
+
+  // Get the database instance
+  public static get client() {
+    if (!Database.isInitialized) {
+      throw new Error("Database not initialized. Call initialize() first.");
+    }
+    return Database.instance;
+  }
+
+  // Execute a query
+  public static async query(text: string, params?: unknown[]) {
+    try {
+      return await Database.client.query(text, params);
+    } catch (error) {
+      console.error("Database query error:", error);
+      throw error;
+    }
+  }
+
+  // Close the connection
+  public static async close() {
+    if (Database.instance) {
+      await Database.instance.end();
+      Database.isInitialized = false;
+    }
+  }
+
+  /**
+   * Imports constitution data from a CSV file into the clauses table
+   *
+   * @param csvFilePath - Path to the CSV file containing constitution data
+   * @returns Number of records successfully imported
+   */
+  public static async importConstitutionFromCsv(csvFilePath: string): Promise<number> {
+    try {
+      const fs = require("fs").promises;
+      const { parse } = require("csv-parse/sync");
+
+      // Make sure database is initialized
+      if (!Database.isInitialized) {
+        await Database.initialize();
+      }
+
+      // Read the CSV file
+      const fileContent = await fs.readFile(csvFilePath, "utf-8");
+      const records = parse(fileContent, {
+        columns: true,
+        skip_empty_lines: true,
+        trim: true,
+      });
+
+      console.log(`Read ${records.length} records from CSV file.`);
+
+      // Clear existing data if needed
+      await Database.client.query("BEGIN");
+      try {
+        // First check if table has data
+        const countResult = await Database.client.query("SELECT COUNT(*) FROM clauses");
+        const rowCount = parseInt(countResult.rows[0].count, 10);
+
+        if (rowCount > 0) {
+          console.log(
+            `Found ${rowCount} existing records in clauses table. Clearing table before import.`,
+          );
+          await Database.client.query("DELETE FROM clauses");
+        }
+
+        // Insert the records
+        let successCount = 0;
+        for (const record of records) {
+          // Validate record has required fields
+          if (
+            !record.id ||
+            !record.part_title ||
+            !record.article_number ||
+            !record.article_title ||
+            !record.clause_number ||
+            !record.content ||
+            !record.language
+          ) {
+            console.warn(`Skipping incomplete record: ${record.id || "unknown ID"}`);
+            continue;
+          }
+
+          // Insert the record
+          await Database.client.query(
+            `INSERT INTO clauses 
+            (clause_id, part_title, article_number, article_title, clause_number, content, source_reference, tags, language) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+            [
+              record.id, // Using the CSV's id field as our clause_id
+              record.part_title,
+              parseInt(record.article_number, 10),
+              record.article_title,
+              parseInt(record.clause_number, 10),
+              record.content,
+              record.source_reference || null,
+              record.tags || null,
+              record.language,
+            ],
+          );
+          successCount++;
+        }
+
+        await Database.client.query("COMMIT");
+        console.log(
+          `Successfully imported ${successCount} constitution clauses into the database.`,
+        );
+        return successCount;
+      } catch (error) {
+        await Database.client.query("ROLLBACK");
+        console.error("Error during constitution import transaction:", error);
+        throw error;
+      }
+    } catch (error) {
+      console.error("Failed to import constitution data:", error);
+      throw new Error(
+        `Constitution import failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+}
+// Initialize the database when imported
+Database.initialize().catch(console.error);
+
+// Export for use throughout the application
+export default Database;
