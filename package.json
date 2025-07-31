@@ -5,8 +5,8 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "genkit start -- node dist/index.js",
-    "dev": "genkit start -- tsx --watch src/index.ts",
+    "start": "node dist/index.js",
+    "dev": "tsx --watch src/index.ts",
     "test": "echo \"Error: no test specified\" && exit 1",
     "prepare": "husky",
     "lint": "biome check .",

@@ -1,14 +1,19 @@
 import { startFlowServer, withContextProvider } from "@genkit-ai/express";
 import dotenv from "dotenv";
-import { z } from "genkit";
+import { type Document, z } from "genkit";
 import { apiKey } from "genkit/context";
 import {
   getConstitutionArticle,
   getConstitutionPart,
   getConstitutionTableOfContents,
 } from "./tools/constitution";
-import { vectorDbRetriever } from "./tools/retriever";
-import { ai } from "./utils/ai";
+import {
+  civilCodeRetriever,
+  criminalCodeRetriever,
+  criminalProcedureRetriever,
+  vectorDbRetriever,
+} from "./tools/retriever";
+import { ai, correctGrammar, detectDocumentType } from "./utils/ai";
 
 dotenv.config();
 interface ChatMessagePart {
@@ -21,18 +26,48 @@ export interface ChatInterface {
 
 const CHAT_HISTORY = new Map<string, Array<ChatInterface>>();
 
+/**
+ * Gets the appropriate document retriever based on AI detection of query type
+ * @param query The user's query
+ * @returns Promise resolving to the appropriate retriever
+ */
+async function getDocumentRetriever(query: string) {
+  // Use AI to detect the document type based on the query
+  const documentType = await detectDocumentType(query);
+
+  console.log(`AI detected document type: ${documentType} for query: "${query}"`);
+
+  // Return the appropriate retriever based on the detected document type
+  switch (documentType) {
+    case "criminal":
+      return criminalCodeRetriever;
+    case "civil":
+      return civilCodeRetriever;
+    case "criminal_procedure":
+      return criminalProcedureRetriever;
+    case "constitution":
+      return vectorDbRetriever;
+    default:
+      return null; // Constitution retriever is the default
+  }
+}
+
 async function main() {
-  const systemPrompt = `You are Kanoon Sathi, an AI legal assistant specializing in Nepali law and the Constitution of Nepal 2015.
+  const systemPrompt = `You are Kanoon Sathi, an AI legal assistant specializing in Nepali law, including the Constitution of Nepal 2015, Criminal Code, Civil Code, and Criminal Procedure Code.
 
 ROLE:
-- Provide accurate, contextual, and up-to-date legal information regarding Nepal's constitutional provisions and frameworks.
+- Provide accurate, contextual, and up-to-date legal information regarding Nepal's legal frameworks.
 - Support users by answering questions clearly, professionally, and compassionately.
 - Act as a knowledgeable assistant—but not a licensed legal professional.
-- Make sure you provide the references of the information you provide, including specific articles and clauses. Always put these references at the bottom of your response.
+- Make sure you provide the references of the information you provide, including specific articles, clauses, sections, and page numbers. Always put these references at the bottom of your response.
 
 CAPABILITIES:
-- You have access to reliable constitutional information, including the complete Constitution of Nepal 2015.
-- You can automatically search and retrieve relevant parts, articles, or clauses using integrated tools and retrievers.
+- You have access to reliable legal information, including:
+  * The complete Constitution of Nepal 2015
+  * The National Penal (Code) Act, 2017 (Criminal Code)
+  * The Civil Code Act, 2017
+  * The Criminal Procedure Code, 2017
+- You can automatically search and retrieve relevant information using integrated tools and retrievers.
 - You never ask users to invoke tools manually or provide unnecessary technical instructions.
 
 BEHAVIOR GUIDELINES:
@@ -60,14 +95,23 @@ LANGUAGE & TONE:
       console.log("Received input:", JSON.stringify(input));
       const prompt = input.text;
 
-      //Retrieve relevant documents
-      const docs = await ai.retrieve({
-        retriever: vectorDbRetriever,
-        query: input.text,
-        options: {
-          k: 2,
-        },
-      });
+      const refinedPrompt = await correctGrammar(prompt);
+      console.log("Refined prompt after grammar correction:", refinedPrompt);
+      // Use AI to select the appropriate retriever based on query content
+      console.log("Detecting document type for query:", refinedPrompt);
+      const selectedRetriever = await getDocumentRetriever(refinedPrompt);
+
+      // Retrieve relevant documents using the selected retriever
+      let docs: Document[] = [];
+      if (selectedRetriever) {
+        docs = await ai.retrieve({
+          retriever: selectedRetriever,
+          query: refinedPrompt,
+          options: {
+            k: 3,
+          },
+        });
+      }
 
       // Update chat history
       CHAT_HISTORY.set(input.chatroomId, [
@@ -78,7 +122,7 @@ LANGUAGE & TONE:
       // Generate response using AI
       const response = await ai.generate({
         system: systemPrompt,
-        prompt: prompt,
+        prompt: refinedPrompt,
         docs: docs,
         tools: [getConstitutionTableOfContents, getConstitutionPart, getConstitutionArticle],
         messages: CHAT_HISTORY.get(input.chatroomId) || [],
@@ -90,7 +134,7 @@ LANGUAGE & TONE:
         { role: "model", content: [{ text: response.text || "" }] },
       ]);
 
-      console.log("Generated response:", JSON.stringify(response));
+      // console.log("Generated response:", JSON.stringify(response));
       // Return the response text
       return response.text || "No response generated.";
     },
@@ -154,5 +198,18 @@ LANGUAGE & TONE:
 // DB.importConstitutionFromCsv("./constitution_dataset.csv")
 //   .then((count) => console.log(`Imported ${count} constitutional clauses`))
 //   .catch((err) => console.error("Failed to import constitution data:", err));
+
+// Process code files (uncomment to process)
+// processCriminalCodeCSV("./criminal_code_pages.csv")
+//   .then((count) => console.log(`Imported and processed ${count} pages from criminal code CSV`))
+//   .catch((err) => console.error("Failed to process criminal code CSV:", err));
+
+// processCivilCodeCSV("./civil_code_pages.csv")
+//   .then((count) => console.log(`Imported and processed ${count} pages from civil code CSV`))
+//   .catch((err) => console.error("Failed to process civil code CSV:", err));
+
+// processCriminalProcedureCSV("./criminal_procedure_pages.csv")
+//   .then((count) => console.log(`Imported and processed ${count} pages from criminal procedure CSV`))
+//   .catch((err) => console.error("Failed to process criminal procedure CSV:", err));
 
 main();
