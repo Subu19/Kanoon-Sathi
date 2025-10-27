@@ -1,7 +1,12 @@
-import { startFlowServer, withContextProvider } from "@genkit-ai/express";
+import { startFlowServer } from "@genkit-ai/express";
+import cors from "cors";
 import dotenv from "dotenv";
+import express from "express";
 import { type Document, z } from "genkit";
-import { apiKey } from "genkit/context";
+import helmet from "helmet";
+import authRoutes from "./routes/auth";
+import chatRoutes from "./routes/chats";
+import { ChatService } from "./services/chatService";
 import {
   getConstitutionArticle,
   getConstitutionPart,
@@ -53,6 +58,29 @@ async function getDocumentRetriever(query: string) {
 }
 
 async function main() {
+  // Create Express app for additional routes
+  const app = express();
+
+  // Security middleware
+  app.use(helmet());
+  app.use(
+    cors({
+      origin: process.env.FRONTEND_URL || "http://localhost:3000",
+      credentials: true,
+    }),
+  );
+  app.use(express.json({ limit: "10mb" }));
+  app.use(express.urlencoded({ extended: true }));
+
+  // API Routes
+  app.use("/api/auth", authRoutes);
+  app.use("/api/chats", chatRoutes);
+
+  // Health check endpoint
+  app.get("/health", (req, res) => {
+    res.json({ status: "OK", timestamp: new Date().toISOString() });
+  });
+
   const systemPrompt = `You are Kanoon Sathi, an AI legal assistant specializing in Nepali law, including the Constitution of Nepal 2015, Criminal Code, Civil Code, and Criminal Procedure Code.
 
 ROLE:
@@ -88,6 +116,7 @@ LANGUAGE & TONE:
       inputSchema: z.object({
         text: z.string(),
         chatroomId: z.string(),
+        userId: z.string().optional(), // For authenticated users
       }),
     },
     async (input) => {
@@ -97,6 +126,7 @@ LANGUAGE & TONE:
 
       const refinedPrompt = await correctGrammar(prompt);
       console.log("Refined prompt after grammar correction:", refinedPrompt);
+
       // Use AI to select the appropriate retriever based on query content
       console.log("Detecting document type for query:", refinedPrompt);
       const selectedRetriever = await getDocumentRetriever(refinedPrompt);
@@ -113,11 +143,32 @@ LANGUAGE & TONE:
         });
       }
 
-      // Update chat history
-      CHAT_HISTORY.set(input.chatroomId, [
-        ...(CHAT_HISTORY.get(input.chatroomId) || []),
-        { role: "user", content: [{ text: prompt }] },
-      ]);
+      // If user is authenticated, save to database
+      if (input.userId && input.chatroomId) {
+        try {
+          // Check if chat exists, if not create it
+          let chat = await ChatService.getChatById(input.chatroomId, input.userId);
+          if (!chat) {
+            chat = await ChatService.createChat(input.userId, {
+              title: refinedPrompt.substring(0, 50) + "...",
+            });
+          }
+
+          // Save user message
+          await ChatService.addMessage(input.chatroomId, input.userId, {
+            content: prompt,
+            sender: "user",
+          });
+        } catch (error) {
+          console.error("Error saving user message:", error);
+        }
+      } else {
+        // For non-authenticated users, use the old MAP system
+        CHAT_HISTORY.set(input.chatroomId, [
+          ...(CHAT_HISTORY.get(input.chatroomId) || []),
+          { role: "user", content: [{ text: prompt }] },
+        ]);
+      }
 
       // Generate response using AI
       const response = await ai.generate({
@@ -125,17 +176,27 @@ LANGUAGE & TONE:
         prompt: refinedPrompt,
         docs: docs,
         tools: [getConstitutionTableOfContents, getConstitutionPart, getConstitutionArticle],
-        messages: CHAT_HISTORY.get(input.chatroomId) || [],
+        messages: input.userId ? [] : CHAT_HISTORY.get(input.chatroomId) || [], // Use empty for auth users, they get context from DB
       });
 
-      // Update chat history with model response
-      CHAT_HISTORY.set(input.chatroomId, [
-        ...(CHAT_HISTORY.get(input.chatroomId) || []),
-        { role: "model", content: [{ text: response.text || "" }] },
-      ]);
+      // Save AI response to database for authenticated users
+      if (input.userId && input.chatroomId && response.text) {
+        try {
+          await ChatService.addMessage(input.chatroomId, input.userId, {
+            content: response.text,
+            sender: "model",
+          });
+        } catch (error) {
+          console.error("Error saving AI response:", error);
+        }
+      } else {
+        // Update MAP for non-authenticated users
+        CHAT_HISTORY.set(input.chatroomId, [
+          ...(CHAT_HISTORY.get(input.chatroomId) || []),
+          { role: "model", content: [{ text: response.text || "" }] },
+        ]);
+      }
 
-      // console.log("Generated response:", JSON.stringify(response));
-      // Return the response text
       return response.text || "No response generated.";
     },
   );
@@ -183,15 +244,17 @@ LANGUAGE & TONE:
   );
 
   startFlowServer({
-    flows: [
-      withContextProvider(autonomousAIFlow, apiKey("1234567890")),
-      withContextProvider(getChatHistory, apiKey("1234567890")),
-      withContextProvider(getConversationList, apiKey("1234567890")),
-    ],
+    flows: [autonomousAIFlow, getChatHistory, getConversationList],
     port: 7777,
   });
 
-  console.log("Server running on port: 7777");
+  // Start Express server
+  const PORT = process.env.PORT || 3001;
+  app.listen(PORT, () => {
+    console.log(`Express server running on port: ${PORT}`);
+  });
+
+  console.log("GenKit Flow server running on port: 7777");
 }
 
 // Import constitution data from CSV if needed

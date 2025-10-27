@@ -126,6 +126,61 @@ class Database {
     await Database.instance.query(`
       CREATE INDEX IF NOT EXISTS idx_clauses_part_title ON clauses (part_title)
     `);
+
+    // Create users table
+    await Database.instance.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        username VARCHAR(100) UNIQUE NOT NULL,
+        email VARCHAR(255) UNIQUE,
+        password_hash VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        last_login TIMESTAMP,
+        is_active BOOLEAN DEFAULT true
+      )
+    `);
+
+    // Create chats table
+    await Database.instance.query(`
+      CREATE TABLE IF NOT EXISTS chats (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Create messages table
+    await Database.instance.query(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        chat_id UUID NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+        sender VARCHAR(20) NOT NULL CHECK (sender IN ('user', 'model', 'system')),
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Create indexes for new tables
+    await Database.instance.query(`
+      CREATE INDEX IF NOT EXISTS idx_users_username ON users (username)
+    `);
+    await Database.instance.query(`
+      CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)
+    `);
+    await Database.instance.query(`
+      CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats (user_id)
+    `);
+    await Database.instance.query(`
+      CREATE INDEX IF NOT EXISTS idx_chats_updated_at ON chats (updated_at DESC)
+    `);
+    await Database.instance.query(`
+      CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages (chat_id)
+    `);
+    await Database.instance.query(`
+      CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages (created_at DESC)
+    `);
   }
 
   // Get the database instance
